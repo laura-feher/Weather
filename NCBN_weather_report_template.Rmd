@@ -1,0 +1,1123 @@
+---
+execute:
+  message: false
+  warning: false
+output: 
+  bookdown::html_document2:
+    toc: false
+    toc_float: false
+    fig_caption: true
+    number_sections: false
+    df_print: kable
+    theme: journal
+    css: journalnps.min.css
+    includes:
+        before_body:
+          - header.html
+
+params:
+  park_code: "ASIS"
+  year_to_assess: "2025"
+---
+
+```{=html}
+<style>
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.column {
+  flex: 50%;
+  padding: 10px;
+}
+</style>
+```
+
+```{r source-scripts, include=FALSE}
+purrr::walk(list.files(here::here("R"), pattern = "\\.[Rr]$", full.names = TRUE), ~source(.x, echo = FALSE))
+```
+
+```{r define-park-specific-variables, include=FALSE}
+park_variables(park_code = params$park_code)
+```
+
+---
+title: "`r params$year_to_assess` Weather in Review: `r park_name`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(dplyr.summarise.inform = FALSE)
+options(knitr.table.format = "html")
+```
+
+```{css caption-hack, echo=FALSE, eval=TRUE}
+
+span.dummy-fig + div.figure > span {
+  display: none !important;
+}
+
+span.dummy-fig + div.figure > img {
+  display: none !important;
+}
+
+div.plotly {
+  margin-bottom: 0px !important;
+}
+```
+
+```{r packages, message=FALSE, warning=FALSE, include=FALSE}
+# Install/Load CRAN packages
+# pacman::p_load(tidyverse, janitor, signs, kableExtra, english, bookdown, here, httr, lubridate, jsonlite, cowplot, grid, magick, geomtextpath)
+library(tidyverse)
+library(janitor)
+library(signs)
+library(kableExtra)
+library(english)
+library(bookdown)
+library(here)
+library(httr)
+library(lubridate)
+library(jsonlite)
+library(cowplot)
+library(grid)
+library(magick)
+library(geomtextpath)
+```
+
+```{r load-gis-data, include=FALSE}
+# Get park/county information derived from GIS (i.e. park/county link)
+park_info <- read.csv(here::here("data", "Park_with_county_data_2022.csv")) %>%
+  janitor::clean_names() %>%
+  mutate(county_fips = str_pad(countyfp, 3, side = "left", pad = 0),
+         state_abr = stusps) %>%
+  rename(county = namelsad) %>%
+  select("park", "network", "county", "state_abr", "county_fips") %>%
+  mutate(code = paste(state_abr, county_fips, sep ="-")) %>%
+  # Exclude these counties for the parks that cross multiple counties - to be consistent with previous years weathers & climate reports
+  filter(!(county %in% c("Accomack County", "Gloucester County", "Surry County", "Queens County", "Richmond County")))
+
+# Get list of states to match NOAA state codes to state names (see NOAA county-readme.txt)
+state_list <- data.frame(state.abb, state.name) %>%
+  janitor::clean_names() %>%
+  rename(state_abr = state_abb)%>%
+  filter(state_name != "Alaska" & state_name != "Hawaii") %>%
+  mutate(state_code = str_pad(row_number(), 2, side = "left", pad = 0))
+```
+
+```{=html}
+<style>
+.vscroll-plot {
+    width: 1000px;
+    height: 400px;
+    overflow-y: scroll;
+    overflow-x: hidden;
+}
+</style>
+```
+
+```{r background-text, message=FALSE, warning=FALSE, include=FALSE}
+background_text <- background_text_fun(park_code = params$park_code)
+```
+
+`r background_text$paragraph1`
+
+This resource brief provides a summary of both historic and current (`r params$year_to_assess`) weather data for [`r park_name`](park_link) (`r params$park_code`), `r state_text`. `r background_text$paragraph2`Temperature and precipitation data presented in this brief are for `r county_text`. Data are available from the [National Climate Data Center](https://www.ncei.noaa.gov/access/monitoring/climate-at-a-glance/county/time-series).
+
+```{r download-weather-data, message=FALSE, warning=FALSE, include=FALSE}
+
+# Get date of most recent weather data available at https://www.ncei.noaa.gov/pub/data/cirs/climdiv/
+proc_date <- readLines("https://www.ncei.noaa.gov/pub/data/cirs/climdiv/procdate.txt")
+
+# Download monthly and process average temp and total precip from NOAA NCEI
+NOAA_tavg_data <- read.delim(paste0("https://www.ncei.noaa.gov/pub/data/cirs/climdiv/climdiv-tmpccy-v1.0.0-", proc_date), 
+                             header = FALSE, 
+                             sep = "") %>%
+  mutate(code = str_pad(V1, 11, side = "left", pad = 0),
+         state_code = substr(code, 1,2),
+         county_fips = substr(code,3,5),
+         date = substr(code, 8,11),
+         metric = "tavg",
+         year_num = as.numeric(date)) %>%
+  filter(year_num <= as.numeric(params$year_to_assess)) %>%
+  mutate(across(V2:V13, ~if_else(.x == -99.9, NA_real_, .x))) %>%
+  left_join(state_list, by = "state_code") %>%
+  mutate(year = round((V2+V3+V4+V5+V6+V7+V8+V9+V10+V11+V12+V13)/12, 1)) %>%
+  rename(January = V2, February = V3, March = V4, April = V5,
+         May = V6, June = V7, July = V8, August = V9, September = V10,
+         October = V11, November = V12, December = V13)%>%
+  select(c(state_code, county_fips, date, state_abr, January:December, year))%>%
+  pivot_longer(c(January:year), names_to = "month", values_to = "value_t")
+
+NOAA_pcp_data <- read.delim(paste0("https://www.ncei.noaa.gov/pub/data/cirs/climdiv/climdiv-pcpncy-v1.0.0-", proc_date), 
+                            header = FALSE, 
+                            sep = "") %>%
+  mutate(code = str_pad(V1, 11, side = "left", pad = 0),
+         state_code = substr(code, 1,2),
+         county_fips = substr(code,3,5),
+         date = substr(code, 8,11),
+         metric = "pavg",
+         year_num = as.numeric(date)) %>%
+  filter(year_num <= as.numeric(params$year_to_assess)) %>%
+  mutate(across(V2:V13, ~if_else(.x == -99.9, NA_real_, .x)))%>%
+  left_join(state_list, by = "state_code")%>%
+  mutate(year = V2+V3+V4+V5+V6+V7+V8+V9+V10+V11+V12+V13)%>%
+  rename(January = V2, February = V3, March = V4, April = V5,
+         May = V6, June = V7, July = V8, August = V9, September = V10,
+         October = V11, November = V12, December = V13)%>%
+  select(c(state_code, county_fips, date, state_abr, January:December, year))%>%
+  pivot_longer(c(January:year), names_to = "month", values_to = "value_p")
+
+# Join temp and precip data and then join park info
+full_data <- left_join(NOAA_tavg_data, NOAA_pcp_data, by = c("state_code", 
+                                                             "county_fips", 
+                                                             "date", 
+                                                             "state_abr", 
+                                                             "month")) %>%
+  left_join(., park_info, by = c("state_abr", "county_fips"))%>%
+  filter(park != "NA")%>%
+  select(c("park", "network", "state_abr", "county", "date", "month", "value_t", "value_p"))%>%
+  select(-c(park, network))%>%
+  unique()
+```
+
+```{r calc-county-metrics, message=FALSE, warning=FALSE, include=FALSE}
+
+# Calculate county-level metrics
+
+# Long-term average over POR excluding the year to be assessed
+long_term_avgs <- full_data %>%
+  filter(date < params$year_to_assess) %>%
+  group_by(state_abr, county, month) %>%
+  summarise(normal_t = mean(value_t),
+            normal_p = mean(value_p)) %>%
+  arrange(state_abr, county)
+
+# Calculate monthly averages and departures from long-term averages
+monthly_avgs <- full_data %>%
+  filter(date == params$year_to_assess) %>%
+  arrange(state_abr, county) %>%
+  left_join(long_term_avgs, by = c("state_abr", "county", "month")) %>%
+  mutate(departure_t = round(value_t - normal_t,1),
+         departure_p = round(value_p - normal_p,2)) %>%
+  select(-c(normal_p, normal_t))
+```
+
+```{r calc-ranks, message=FALSE, warning=FALSE, include=FALSE}
+
+# Calculate ranks for each season/year in each county for each metric 
+ranks_data <- full_data %>%
+  mutate(season = case_when(
+    month %in% c("January", "February","March") ~ "winter",
+    month %in% c("April", "May","June") ~ "spring",
+    month %in% c("July", "August","September") ~ "summer",
+    month %in% c("October", "November","December") ~ "fall",
+    month == "year" ~ "year"
+  )) %>%
+  group_by(state_abr, county, date, season) %>%
+  summarise(value_t = round(mean(value_t),1),
+            value_p = round(sum(value_p),2)) %>%
+  mutate(concat_ID = paste(state_abr, county, season, sep = "_")) %>%
+  group_by(state_abr, county, season) %>%
+  mutate(mean_value_t = mean(value_t, na.rm = T),
+         mean_value_p = mean(value_p, na.rm = T),
+         rank_method_t_c = if_else(value_t < mean_value_t, "min", "max"),
+         rank_method_t_w = if_else(value_t < mean_value_t, "max", "min"),
+         rank_method_p_d = if_else(value_p < mean_value_p, "min", "max"),
+         rank_method_p_w = if_else(value_p < mean_value_p, "max", "min"))
+
+args_df <- park_info %>%
+  select(county, state_abr) %>%
+  unique() %>%
+  merge(expand.grid(years = params$year_to_assess,
+                    seasons = c("winter", "spring", "summer", "fall", "year")))
+
+ranking_results <- mapply(get_ranks,
+                        args_df$seasons, 
+                        args_df$state_abr, 
+                        args_df$county, 
+                        args_df$years, 
+                        SIMPLIFY = FALSE) %>%
+  bind_rows()
+```
+
+```{r avg-park-county-data, message=FALSE, warning=FALSE, include=FALSE}
+
+# Average county trend data to get park-scale data
+park_trend <- full_data %>%
+  filter(month == "year")%>%
+  select(-month) %>%
+  left_join(park_info, ., by = c("state_abr", "county")) %>%
+  group_by(network, park, county, date) %>%
+  summarise(mean_value_t = mean(value_t),
+            mean_value_p = mean(value_p))
+
+# Average county monthly data to get park-scale data
+## the signs function appends signs (+/-) to data 
+park_monthly_avgs <- left_join(park_info, monthly_avgs, by = c("state_abr", "county")) %>%
+  group_by(network, park, county, date, month) %>%
+  summarise(mean_value_t = sprintf("%.1f", mean(value_t)), 
+            mean_value_p = sprintf("%.2f", mean(value_p)), 
+            mean_departure_t = signs::signs(mean(departure_t), 
+                                     accuracy = .1, add_plusses = TRUE, 
+                                     label_at_zero = "none"),
+            mean_departure_p = signs::signs(mean(departure_p), 
+                                     accuracy = .01, add_plusses = TRUE, 
+                                     label_at_zero = "none"))
+
+# Average county ranking data to get park-scale data
+park_rankings <- left_join(park_info, ranking_results, by = c("state_abr", "county")) %>%
+  group_by(network, park, county, date, season) %>%
+  summarize(mean_rank_t_cold = round(mean(rank_t_coldest), 1),
+            mean_rank_t_warm = round(mean(rank_t_warmest), 1),
+            mean_rank_p_dry = round(mean(rank_p_driest), 1),
+            mean_rank_p_wet = round(mean(rank_p_wettest), 1))
+
+total_years <- ranks_data %>%
+  filter((county == county_header1 & season == "year")| (county == county_header2 & season == "year")) %>%
+  group_by(state_abr, county) %>%
+  summarise(n_years = n())
+```
+
+------------------------------------------------------------------------
+
+# Temperature
+
+```{r temp-summary-text-county1, message=FALSE, warning=FALSE, include=FALSE}
+temp_summary_text <- temp_summary(park_code = params$park_code, year = params$year_to_assess)
+```
+
+```{r temp-header-county1, echo=FALSE, eval=print_multiple_county}
+knitr::asis_output(paste0("### ", county_header1, "\\n"))
+```
+
+`r temp_summary_text$county1`
+
+::::: row
+::: column
+```{r temp-table-county1, echo=FALSE, message=FALSE, warning=FALSE}
+park_monthly_avgs %>%
+  ungroup() %>%
+  filter(park == params$park_code & county == county_header1) %>%
+  mutate(month = if_else(month == "year", "Annual", month),
+         month = factor(month, levels = c(month.name, "Annual"))) %>%
+  arrange(month) %>%
+  select(month, mean_value_t, mean_departure_t) %>%
+  kbl(col.names = c(paste0("   Month (", params$year_to_assess, ") "), " Average temperature (°F) ", " Departure from long-term<br>average temperature (°F) "),
+      align = c("c", "c", "c"),
+      escape = FALSE) %>%
+  row_spec(c(0,13), bold = TRUE) %>%
+  row_spec(c(1,2,3,4,5,6,7,8,9,10,11,12,13), extra_css = "border-top: 1px solid black; border-bottom: 1px solid black;") %>%
+  row_spec(0, extra_css = "border-left: 1px solid black; border-right: 1px solid black; border-top: 1px solid black;", background = "#b4aea3") %>%
+  column_spec(c(1,2,3), border_left = TRUE, border_right = TRUE) %>%
+  footnote(general = paste0("Table 1. ", county_header1, ", ", state_name1, " average monthly, average annual, and departures from long-term average temperatures. Departures from average are based on a comparison of ", params$year_to_assess, " average temperatures to relevant averages from 1895-", as.integer(params$year_to_assess)-1, ". Data are available at NOAA NCEI: Climate at a Glance (", noaa_ncei_timeseries_links(park_code = params$park_code, year = params$year_to_assess)$temp_table_county1_link, ")."), footnote_as_chunk = TRUE, general_title = "") 
+```
+:::
+
+::: column
+```{r format-temp-data-county1, message=FALSE, warning=FALSE, include=FALSE}
+temp_rankings_county1 <- ranking_results %>%
+  ungroup() %>%
+  filter(county == county_header1) %>%
+  left_join(., total_years) %>%
+  mutate(scale_rank_warmest = (rank_t_warmest*100)/n_years) %>%
+  mutate(warmest_coldest = if_else(scale_rank_warmest <= 50, "warmest", "coldest"),
+         caption = case_when(
+           warmest_coldest == "warmest" & rank_t_warmest == 1 ~ " warmest",
+           warmest_coldest == "coldest" & rank_t_coldest == 1 ~ " coldest",
+           warmest_coldest == "warmest" & rank_t_warmest > 1 ~ paste0(scales::label_ordinal()(rank_t_warmest), " warmest"),
+           warmest_coldest == "coldest" & rank_t_coldest > 1 ~ paste0(scales::label_ordinal()(rank_t_coldest), " coldest")
+         ),
+         caption2 = if_else(
+           rank_t_warmest == 1 | rank_t_coldest == 1,
+           paste0(caption, " ", season, " on record"),
+           paste0(caption, " ", season)
+         ),
+         label = if_else(season == "year", params$year_to_assess, str_to_sentence(season)),
+         y_position = 100 - scale_rank_warmest,
+         x_position = if_else(season == "year", 40, 60),
+         arrow_start = if_else(season == "year", 41, 55),
+         arrow_end = if_else(season == "year", 45, 59)) %>%
+  mutate(y_position = if_else(y_position == 0, 2, y_position)) # if any labels are at the very bottom, add 2 to keep them from getting cut off
+
+temp_fig_county1_caption <- paste0(
+  county_header1, 
+  ", ", 
+  state_name1, 
+  " annual and seasonal temperature rankings from 1895-", 
+  params$year_to_assess, 
+  ". Of the ", 
+  total_years %>% filter(county == county_header1) %>% pull(., n_years), 
+  " records, ", 
+  params$year_to_assess, 
+  " was the ", 
+  temp_rankings_county1 %>% filter(season == "year") %>% pull(., caption2), 
+  ". Seasonally, it was the ", 
+  temp_rankings_county1 %>% filter(season == "winter") %>% pull(., caption2), 
+  ", ", 
+  temp_rankings_county1 %>% filter(season == "spring") %>% pull(., caption2), 
+  ", ", 
+  temp_rankings_county1 %>% filter(season == "summer") %>% pull(., caption2), 
+  ", and the ", 
+  temp_rankings_county1 %>% filter(season == "fall") %>% pull(., caption2), 
+  ". Data are available at NOAA NCEI: Climate at a Glance (",
+  noaa_ncei_timeseries_links(
+    park_code = params$park_code, 
+    year = params$year_to_assess)$temp_figure_county1_link, 
+  ")."
+  )
+```
+
+```{r temp-fig-county1, echo=FALSE, fig.cap=temp_fig_county1_caption, message=FALSE, warning=FALSE}
+thermometer <- rasterGrob(image_read("thermometer.png"), interpolate = TRUE)  
+
+ggplot(data = data.frame(x=seq(0,100, by = 1), y = seq(0,100,by = 1)), aes(x=x,y=y)) +
+  annotation_custom(grob = thermometer, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) +
+  geom_point(color = "transparent") +
+  geom_segment(data = temp_rankings_county1 %>% filter(season != "year"), aes(x = arrow_start, xend = arrow_end, y = y_position, yend = y_position), arrow = arrow(ends = "first", length = unit(7, "pt"), type = "closed"), size = 1) +
+  geom_segment(data = temp_rankings_county1 %>% filter(season == "year"), aes(x = arrow_start, xend = arrow_end, y = y_position, yend = y_position), arrow = arrow(ends = "last", length = unit(7, "pt"), type = "closed"), size = 1) +
+  geom_text(data = temp_rankings_county1 %>% filter(season != "year"), aes(x = x_position, y = y_position, label = label), hjust = 0, vjust = 0.5) +
+  geom_text(data = temp_rankings_county1 %>% filter(season == "year"), aes(x = x_position, y = y_position, label = label), hjust = 1, vjust = 0.5) +
+  scale_y_continuous(limits = c(0,100), expand = c(0,0)) +
+  theme(
+    plot.background = element_blank(),
+    panel.background = element_blank(),
+    text = element_blank(),
+    axis.ticks = element_blank(),
+    plot.margin = unit(c(0,-5,0,-5), "cm")
+  )
+```
+:::
+:::::
+
+```{r temp-header-county2, echo=FALSE, eval=print_multiple_county}
+knitr::asis_output(paste0("### ", county_header2, "\\n"))
+```
+
+```{r temp-summary-county2, echo=FALSE, eval=print_multiple_county}
+knitr::asis_output(temp_summary_text$county2)
+```
+
+::::: row
+::: column
+```{r temp-table-county2, results='asis', eval=print_multiple_county, echo=FALSE, message=FALSE, warning=FALSE}
+park_monthly_avgs %>%
+  ungroup() %>%
+  filter(park == params$park_code & county == county_header2) %>%
+  mutate(month = if_else(month == "year", "Annual", month),
+         month = factor(month, levels = c(month.name, "Annual"))) %>%
+  arrange(month) %>%
+  select(month, mean_value_t, mean_departure_t) %>%
+  kbl(col.names = c(paste0("   Month (", params$year_to_assess, ") "), " Average temperature (°F) ", " Departure from long-term<br>average temperature (°F) "),
+      align = c("c", "c", "c"),
+      escape = FALSE) %>%
+  row_spec(c(0,13), bold = TRUE) %>%
+  row_spec(c(1,2,3,4,5,6,7,8,9,10,11,12,13), extra_css = "border-top: 1px solid black; border-bottom: 1px solid black;") %>%
+  row_spec(0, extra_css = "border-left: 1px solid black; border-right: 1px solid black; border-top: 1px solid black;", background = "#b4aea3") %>%
+  column_spec(c(1,2,3), border_left = TRUE, border_right = TRUE) %>%
+  footnote(general = paste0("Table 2. ", county_header2, ", ", state_name2, " average monthly, average annual, and departures from long-term average temperatures. Departures from average are based on a comparison of ", params$year_to_assess, " average temperatures to relevant averages from 1895-", as.integer(params$year_to_assess)-1, ". Data are available at NOAA NCEI: Climate at a Glance (", noaa_ncei_timeseries_links(park_code = params$park_code, year = params$year_to_assess)$temp_table_county2_link, ")."), footnote_as_chunk = TRUE, general_title = "") 
+```
+:::
+
+::: column
+```{r format-temp-data-county2, results='asis', eval=print_multiple_county, message=FALSE, warning=FALSE, include=FALSE}
+temp_rankings_county2 <- ranking_results %>%
+  ungroup() %>%
+  filter(county == county_header2) %>%
+  left_join(., total_years) %>%
+  mutate(scale_rank_warmest = (rank_t_warmest*100)/n_years) %>%
+  mutate(warmest_coldest = if_else(scale_rank_warmest <= 50, "warmest", "coldest"),
+         caption = case_when(
+           warmest_coldest == "warmest" & rank_t_warmest == 1 ~ " warmest",
+           warmest_coldest == "coldest" & rank_t_coldest == 1 ~ " coldest",
+           warmest_coldest == "warmest" & rank_t_warmest > 1 ~ paste0(scales::label_ordinal()(rank_t_warmest), " warmest"),
+           warmest_coldest == "coldest" & rank_t_coldest > 1 ~ paste0(scales::label_ordinal()(rank_t_coldest), " coldest")
+         ),
+         caption2 = if_else(
+           rank_t_warmest == 1 | rank_t_coldest == 1,
+           paste0(caption, " ", season, " on record"),
+           paste0(caption, " ", season)
+         ),
+         label = if_else(season == "year", params$year_to_assess, str_to_sentence(season)),
+         y_position = 100 - scale_rank_warmest,
+         x_position = if_else(season == "year", 40, 60),
+         arrow_start = if_else(season == "year", 41, 55),
+         arrow_end = if_else(season == "year", 45, 59)) %>%
+  mutate(y_position = if_else(y_position == 0, 2, y_position)) # if any labels are at the very bottom, add 2 to keep them from getting cut off
+
+temp_fig_county2_caption <- paste0(
+  county_header2, 
+  ", ", 
+  state_name2, 
+  " annual and seasonal temperature rankings from 1895-", 
+  params$year_to_assess, 
+  ". Of the ", 
+  total_years %>% filter(county == county_header2) %>% pull(., n_years), 
+  " records, ", 
+  params$year_to_assess, 
+  " was the ", 
+  temp_rankings_county2 %>% filter(season == "year") %>% pull(., caption2), 
+  ". Seasonally, it was the ", 
+  temp_rankings_county2 %>% filter(season == "winter") %>% pull(., caption2), 
+  ", ", 
+  temp_rankings_county2 %>% filter(season == "spring") %>% pull(., caption2), 
+  ", ", 
+  temp_rankings_county2 %>% filter(season == "summer") %>% pull(., caption2), 
+  ", and the ", 
+  temp_rankings_county2 %>% filter(season == "fall") %>% pull(., caption2), 
+  ". Data are available at NOAA NCEI: Climate at a Glance (",
+  noaa_ncei_timeseries_links(
+    park_code = params$park_code, 
+    year = params$year_to_assess)$temp_figure_county2_link, 
+  ")."
+  )
+```
+
+```{r temp-fig-county2, echo=FALSE, fig.cap=temp_fig_county2_caption, message=FALSE, warning=FALSE, results='asis', eval=print_multiple_county}
+thermometer <- rasterGrob(image_read("thermometer.png"), interpolate = TRUE)  
+
+ggplot(data = data.frame(x=seq(0,100, by = 1), y = seq(0,100,by = 1)), aes(x=x,y=y)) +
+  annotation_custom(grob = thermometer, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) +
+  geom_point(color = "transparent") +
+  geom_segment(data = temp_rankings_county2 %>% filter(season != "year"), aes(x = arrow_start, xend = arrow_end, y = y_position, yend = y_position), arrow = arrow(ends = "first", length = unit(7, "pt"), type = "closed"), size = 1) +
+  geom_segment(data = temp_rankings_county2 %>% filter(season == "year"), aes(x = arrow_start, xend = arrow_end, y = y_position, yend = y_position), arrow = arrow(ends = "last", length = unit(7, "pt"), type = "closed"), size = 1) +
+  geom_text(data = temp_rankings_county2 %>% filter(season != "year"), aes(x = x_position, y = y_position, label = label), hjust = 0, vjust = 0.5) +
+  geom_text(data = temp_rankings_county2 %>% filter(season == "year"), aes(x = x_position, y = y_position, label = label), hjust = 1, vjust = 0.5) +
+  scale_y_continuous(limits = c(0,100), expand = c(0,0)) +
+  theme(
+    plot.background = element_blank(),
+    panel.background = element_blank(),
+    text = element_blank(),
+    axis.ticks = element_blank(),
+    plot.margin = unit(c(0,-5,0,-5), "cm")
+  )
+```
+:::
+:::::
+
+------------------------------------------------------------------------
+
+# Precipitation
+
+```{r precip-header-county1, echo=FALSE, eval=print_multiple_county}
+knitr::asis_output(paste0("### ", county_header1, "\\n"))
+```
+
+```{r precip-summary-text_county1, message=FALSE, warning=FALSE, include=FALSE}
+precip_summary_text <- precip_summary(park_code = params$park_code, year = params$year_to_assess)
+```
+
+`r precip_summary_text$county1`
+
+::::: row
+::: column
+```{r precip_table_county1, echo=FALSE, message=FALSE, warning=FALSE}
+park_monthly_avgs %>%
+  ungroup() %>%
+  filter(park == params$park_code & county == county_header1) %>%
+  mutate(month = if_else(month == "year", "Annual", month),
+         month = factor(month, levels = c(month.name, "Annual"))) %>%
+  arrange(month) %>%
+  select(month, mean_value_p, mean_departure_p) %>%
+  kbl(col.names = c(paste0("Month (", params$year_to_assess, ")"), "Total precipitation (in)", "Departure from long-term<br>average precipitation (in)"),
+      align = c("c", "c", "c"),
+      escape = FALSE) %>%
+  #kable_classic(full_width = FALSE, html_font = "Cambria", position = "float_left") %>%
+  row_spec(c(0,13), bold = TRUE) %>%
+  row_spec(c(1,2,3,4,5,6,7,8,9,10,11,12,13), extra_css = "border-top: 1px solid black; border-bottom: 1px solid black;") %>%
+  row_spec(0, extra_css = "border-left: 1px solid black; border-right: 1px solid black; border-top: 1px solid black;", background = "#b4aea3") %>%
+  column_spec(c(1,2,3), border_left = TRUE, border_right = TRUE) %>%
+  footnote(general = paste0("Table ",  if_else(params$park_code %in% c("COLO", "GATE"), "3", "2"), ". ", county_header1, ", " , state_name1, " monthly and annual total precipitation and departures from long-term average totals. Departures from average are based on a comparison of ", params$year_to_assess, " precipitation levels to relevant averages from 1895-", as.integer(params$year_to_assess)-1, ". Data are available at NOAA NCEI: Climate at a Glance (", noaa_ncei_timeseries_links(park_code = params$park_code, year = params$year_to_assess)$precip_table_county1_link, ")"), footnote_as_chunk = TRUE, general_title = "")
+```
+:::
+
+::: column
+```{r format-precip-data_county1, message=FALSE, warning=FALSE, include=FALSE}
+precip_rankings_county1 <- ranking_results %>%
+  ungroup() %>%
+  filter(county == county_header1) %>%
+  left_join(., total_years) %>%
+  mutate(scale_rank_wettest = (rank_p_wettest*100)/n_years) %>%
+  mutate(wettest_driest = if_else(scale_rank_wettest <= 50, "wettest", "driest"),
+         caption = case_when(
+           wettest_driest == "wettest" & rank_p_wettest == 1 ~ " wettest",
+           wettest_driest == "driest" & rank_p_driest == 1 ~ " driest",
+           wettest_driest == "wettest" & rank_p_wettest > 1 ~ paste0(scales::label_ordinal()(rank_p_wettest), " wettest"),
+           wettest_driest == "driest" & rank_p_driest > 1 ~ paste0(scales::label_ordinal()(rank_p_driest), " driest")
+         ),
+         caption2 = if_else(
+           rank_p_wettest == 1 | rank_p_driest == 1,
+           paste0(caption, " ", season, " on record"),
+           paste0(caption, " ", season)
+         ),
+         label = if_else(season == "year", params$year_to_assess, str_to_sentence(season)),
+         y_position = 100 - scale_rank_wettest,
+         x_position = if_else(season == "year", 40, 60),
+         arrow_start = if_else(season == "year", 41, 55),
+         arrow_end = if_else(season == "year", 45, 59)) %>%
+  mutate(y_position = if_else(y_position == 0, 2, y_position)) # if any labels are at the very bottom, add 2 to keep them from getting cut off
+
+precip_fig_county1_caption <- paste0(
+  county_header1, 
+  ", ", 
+  state_name1, 
+  " annual and seasonal precipitation rankings from 1895-", 
+  params$year_to_assess, 
+  ". Of the ", 
+  total_years %>% filter(county == county_header1) %>% pull(., n_years), 
+  " records, ", 
+  params$year_to_assess, 
+  " was the ", 
+  precip_rankings_county1 %>% filter(season == "year") %>% pull(., caption2), 
+  ". Seasonally, it was the ", 
+  precip_rankings_county1 %>% filter(season == "winter") %>% pull(., caption2), 
+  ", ", 
+  precip_rankings_county1 %>% filter(season == "spring") %>% pull(., caption2), 
+  ", ", 
+  precip_rankings_county1 %>% filter(season == "summer") %>% pull(., caption2), 
+  ", and the ", 
+  precip_rankings_county1 %>% filter(season == "fall") %>% pull(., caption2), 
+  ". Data are available at NOAA NCEI: Climate at a Glance (",
+  noaa_ncei_timeseries_links(
+    park_code = params$park_code, 
+    year = params$year_to_assess)$precip_figure_county1_link, 
+  ")."
+  )
+```
+
+```{r precip-fig-county1, fig.cap=precip_fig_county1_caption, echo=FALSE, message=FALSE, warning=FALSE}
+raingauge <- rasterGrob(image_read("raingauge.png"), interpolate = TRUE)  
+
+ggplot(data = data.frame(x=seq(0,100, by = 1), y = seq(0,100,by = 1)), aes(x=x,y=y)) +
+  annotation_custom(grob = raingauge, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) +
+  geom_point(color = "transparent") +
+  geom_segment(data = precip_rankings_county1 %>% filter(season != "year"), aes(x = arrow_start, xend = arrow_end, y = y_position, yend = y_position), arrow = arrow(ends = "first", length = unit(7, "pt"), type = "closed"), size = 1) +
+  geom_segment(data = precip_rankings_county1 %>% filter(season == "year"), aes(x = arrow_start, xend = arrow_end, y = y_position, yend = y_position), arrow = arrow(ends = "last", length = unit(7, "pt"), type = "closed"), size = 1) +
+  geom_text(data = precip_rankings_county1 %>% filter(season != "year"), aes(x = x_position, y = y_position, label = label), hjust = 0, vjust = 0.5) +
+  geom_text(data = precip_rankings_county1 %>% filter(season == "year"), aes(x = x_position, y = y_position, label = label), hjust = 1, vjust = 0.5) +
+  scale_y_continuous(limits = c(0,100), expand = c(0,0)) +
+  theme(
+    plot.background = element_blank(),
+    panel.background = element_blank(),
+    text = element_blank(),
+    axis.ticks = element_blank(),
+    plot.margin = unit(c(0,-5,0,-5), "cm")
+  )
+```
+:::
+:::::
+
+```{r precip-header-county2, echo=FALSE, eval=print_multiple_county}
+knitr::asis_output(paste0("### ", county_header2, "\\n"))
+```
+
+```{r precip-summary-county2, echo=FALSE, eval=print_multiple_county}
+knitr::asis_output(precip_summary_text$county2)
+```
+
+::::: row
+::: column
+```{r precip_table_county2, results='asis', eval=print_multiple_county, echo=FALSE, message=FALSE, warning=FALSE}
+park_monthly_avgs %>%
+  ungroup() %>%
+  filter(park == params$park_code & county == county_header2) %>%
+  mutate(month = if_else(month == "year", "Annual", month),
+         month = factor(month, levels = c(month.name, "Annual"))) %>%
+  arrange(month) %>%
+  select(month, mean_value_p, mean_departure_p) %>%
+  kbl(col.names = c(paste0("Month (", params$year_to_assess, ")"), "Total precipitation (in)", "Departure from long-term<br>average precipitation (in)"),
+      align = c("c", "c", "c"),
+      escape = FALSE) %>%
+  #kable_classic(full_width = FALSE, html_font = "Cambria", position = "float_left") %>%
+  row_spec(c(0,13), bold = TRUE) %>%
+  row_spec(c(1,2,3,4,5,6,7,8,9,10,11,12,13), extra_css = "border-top: 1px solid black; border-bottom: 1px solid black;") %>%
+  row_spec(0, extra_css = "border-left: 1px solid black; border-right: 1px solid black; border-top: 1px solid black;", background = "#b4aea3") %>%
+  column_spec(c(1,2,3), border_left = TRUE, border_right = TRUE) %>%
+  footnote(general = paste0("Table ",  if_else(params$park_code %in% c("COLO", "GATE"), "4", "2"), ". ", county_header2, ", ", state_name2, " monthly and annual total precipitation and departures from long-term average totals. Departures from average are based on a comparison of ", params$year_to_assess, " precipitation levels to relevant averages from 1895-", as.integer(params$year_to_assess)-1, ". Data are available at NOAA NCEI: Climate at a Glance (", noaa_ncei_timeseries_links(park_code = params$park_code, year = params$year_to_assess)$precip_table_county2_link, ")"), footnote_as_chunk = TRUE, general_title = "")
+```
+:::
+
+::: column
+```{r format-precip-data_county2, results='asis', eval=print_multiple_county, message=FALSE, warning=FALSE, include=FALSE}
+precip_rankings_county2 <- ranking_results %>%
+  ungroup() %>%
+  filter(county == county_header2) %>%
+  left_join(., total_years) %>%
+  mutate(scale_rank_wettest = (rank_p_wettest*100)/n_years) %>%
+  mutate(wettest_driest = if_else(scale_rank_wettest <= 50, "wettest", "driest"),
+         caption = case_when(
+           wettest_driest == "wettest" & rank_p_wettest == 1 ~ " wettest",
+           wettest_driest == "driest" & rank_p_driest == 1 ~ " driest",
+           wettest_driest == "wettest" & rank_p_wettest > 1 ~ paste0(scales::label_ordinal()(rank_p_wettest), " wettest"),
+           wettest_driest == "driest" & rank_p_driest > 1 ~ paste0(scales::label_ordinal()(rank_p_driest), " driest")
+         ),
+         caption2 = if_else(
+           rank_p_wettest == 1 | rank_p_driest == 1,
+           paste0(caption, " ", season, " on record"),
+           paste0(caption, " ", season)
+         ),
+         label = if_else(season == "year", params$year_to_assess, str_to_sentence(season)),
+         y_position = 100 - scale_rank_wettest,
+         x_position = if_else(season == "year", 40, 60),
+         arrow_start = if_else(season == "year", 41, 55),
+         arrow_end = if_else(season == "year", 45, 59)) %>%
+  mutate(y_position = if_else(y_position == 0, 2, y_position)) # if any labels are at the very bottom, add 2 to keep them from getting cut off
+
+precip_fig_county2_caption <- paste0(
+  county_header2, 
+  ", ", 
+  state_name2, 
+  " annual and seasonal precipitation rankings from 1895-", 
+  params$year_to_assess, 
+  ". Of the ", 
+  total_years %>% filter(county == county_header2) %>% pull(., n_years), 
+  " records, ", 
+  params$year_to_assess, 
+  " was the ", 
+  precip_rankings_county2 %>% filter(season == "year") %>% pull(., caption2), 
+  ". Seasonally, it was the ", 
+  precip_rankings_county2 %>% filter(season == "winter") %>% pull(., caption2), 
+  ", ", 
+  precip_rankings_county2 %>% filter(season == "spring") %>% pull(., caption2), 
+  ", ", 
+  precip_rankings_county2 %>% filter(season == "summer") %>% pull(., caption2), 
+  ", and the ", 
+  precip_rankings_county2 %>% filter(season == "fall") %>% pull(., caption2), 
+  ". Data are available at NOAA NCEI: Climate at a Glance (",
+  noaa_ncei_timeseries_links(
+    park_code = params$park_code, 
+    year = params$year_to_assess)$precip_figure_county2_link, 
+  ")."
+  )
+```
+
+```{r precip-fig-county2, results='asis', eval=print_multiple_county, fig.cap=precip_fig_county2_caption, echo=FALSE, message=FALSE, warning=FALSE}
+raingauge <- rasterGrob(image_read("raingauge.png"), interpolate = TRUE)  
+
+ggplot(data = data.frame(x=seq(0,100, by = 1), y = seq(0,100,by = 1)), aes(x=x,y=y)) +
+  annotation_custom(grob = raingauge, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) +
+  geom_point(color = "transparent") +
+  geom_segment(data = precip_rankings_county2 %>% filter(season != "year"), aes(x = arrow_start, xend = arrow_end, y = y_position, yend = y_position), arrow = arrow(ends = "first", length = unit(7, "pt"), type = "closed"), size = 1) +
+  geom_segment(data = precip_rankings_county2 %>% filter(season == "year"), aes(x = arrow_start, xend = arrow_end, y = y_position, yend = y_position), arrow = arrow(ends = "last", length = unit(7, "pt"), type = "closed"), size = 1) +
+  geom_text(data = precip_rankings_county2 %>% filter(season != "year"), aes(x = x_position, y = y_position, label = label), hjust = 0, vjust = 0.5) +
+  geom_text(data = precip_rankings_county2 %>% filter(season == "year"), aes(x = x_position, y = y_position, label = label), hjust = 1, vjust = 0.5) +
+  scale_y_continuous(limits = c(0,100), expand = c(0,0)) +
+  theme(
+    plot.background = element_blank(),
+    panel.background = element_blank(),
+    text = element_blank(),
+    axis.ticks = element_blank(),
+    plot.margin = unit(c(0,-5,0,-5), "cm")
+  )
+```
+:::
+:::::
+
+------------------------------------------------------------------------
+
+# Temperature and Precipitation Trends (1895-`r as.integer(params$year_to_assess)`)
+
+```{r temp-fig-nums, message=FALSE, warning=FALSE, include=FALSE}
+if (params$park_code %in% c("COLO", "GATE")) {
+  temp_precip_fig_nums <- "Figure 5 and 6"
+} else {
+  temp_precip_fig_nums <- "Figure 3"
+}
+```
+
+Temperature and precipitation data are gathered from the [U.S. Climate Divisional Database](https://www.ncei.noaa.gov/access/monitoring/reference-maps/conus-climate-divisions), which stores data from January 1895 to the present, and can be accessed via the National Oceanic and Atmospheric Administration’s (NOAA) [National Centers for Environmental Information](https://www.ncei.noaa.gov/access/monitoring/climate-at-a-glance/county/time-series) (NCEI) website (`r temp_precip_fig_nums`). Users can choose different geographic scales (i.e., global, national, statewide), different temporal scales, and display them in various types of graphical formats.
+
+```{r temp-precip-stats-county1, message=FALSE, warning=FALSE, include=FALSE}
+temp_coef_county1 <- signs::signs(round(summary(lm(mean_value_t ~ as.integer(date), data = filter(park_trend, park == params$park_code & county == county_header1)))$coefficients[2,1] * 10, 1), accuracy = 0.1, add_plusses = TRUE, label_at_zero = "none")
+
+precip_coef_county1 <- signs::signs(round(summary(lm(mean_value_p ~ as.integer(date), data = filter(park_trend, park == params$park_code & county == county_header1)))$coefficients[2,1] * 10, 2), accuracy = 0.01, add_plusses = TRUE, label_at_zero = "none")
+
+temp_precip_fig_county1_caption <- paste0(county_header1, ", ", state_name1, " yearly average temperature and precipitation from 1895 to ", params$year_to_assess, ". Dashed lines represent the 1895-", params$year_to_assess, " trend for each parameter; ", temp_coef_county1, "\u00B0F/decade for temperature and ", precip_coef_county1, " in/decade for precipitation. Data are available at NOAA NCEI: Climate at a Glance (https://www.ncdc.noaa.gov/cag/county/time-series/).")
+```
+
+```{r temp-precip-fig-county1, echo=FALSE, message=FALSE, warning=FALSE, fig.cap=temp_precip_fig_county1_caption, fig.align='center'}
+park_trend %>%
+  filter(park == params$park_code & county == county_header1) %>%
+  ungroup() %>%
+ggplot(.) +
+  geom_line(aes(x = as.integer(date), y = mean_value_t), color = "#f91219") +
+  geom_line(aes(x = as.integer(date), y = mean_value_p), color = "#002d9a") +
+  geom_smooth(aes(x = as.integer(date), y = mean_value_t), method = "lm", se = FALSE, linetype = "dashed", color = "black") +
+  geom_smooth(aes(x = as.integer(date), y = mean_value_p), method = "lm", se = FALSE, linetype = "dashed", color = "black") +
+  scale_y_continuous(name = "Annual average\ntemperature (\u00B0F)", sec.axis = sec_axis(transform = ~.*1, name = "Annual total\nprecipitation (in)")) +
+  scale_x_continuous(limits = c(1895, as.integer(params$year_to_assess)), breaks = seq(1900,2020, by = 10)) +
+  theme(
+    axis.title.x = element_blank(),
+    axis.title.y.left = element_text(color = "#f91219"),
+    axis.text.y.left = element_text(color = "#f91219"),
+    axis.title.y.right = element_text(color = "#002d9a"),
+    axis.text.y.right = element_text(color = "#002d9a"),
+    axis.text.x = element_text(color = "black"),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.major.y = element_line(color = "grey"),
+    panel.grid.minor.y = element_line(color = "grey"),
+    panel.background = element_rect(fill = "white", color = "black")
+  )
+```
+
+```{r temp-precip-stats-county2, results='asis', eval=print_multiple_county, message=FALSE, warning=FALSE, include=FALSE}
+temp_coef_county2 <- signs::signs(round(summary(lm(mean_value_t ~ as.integer(date), data = filter(park_trend, park == params$park_code & county == county_header2)))$coefficients[2,1] * 10, 1), accuracy = 0.1, add_plusses = TRUE, label_at_zero = "none")
+
+precip_coef_county2 <- signs::signs(round(summary(lm(mean_value_p ~ as.integer(date), data = filter(park_trend, park == params$park_code & county == county_header2)))$coefficients[2,1] * 10, 2), accuracy = 0.01, add_plusses = TRUE, label_at_zero = "none")
+
+temp_precip_fig_county2_caption <- paste0(county_header2, ", ", state_name1, " yearly average temperature and precipitation from 1895 to ", params$year_to_assess, ". Dashed lines represent the 1895-", params$year_to_assess, " trend for each parameter; ", temp_coef_county2, "\u00B0F/decade for temperature and ", precip_coef_county2, " in/decade for precipitation. Data are available at NOAA NCEI: Climate at a Glance (https://www.ncdc.noaa.gov/cag/county/time-series/).")
+```
+
+```{r temp-precip-fig-county2, results='asis', eval=print_multiple_county, echo=FALSE, message=FALSE, warning=FALSE, fig.cap=temp_precip_fig_county2_caption, fig.align='center'}
+park_trend %>%
+  filter(park == params$park_code & county == county_header2) %>%
+  ungroup() %>%
+ggplot(.) +
+  geom_line(aes(x = as.integer(date), y = mean_value_t), color = "#f91219") +
+  geom_line(aes(x = as.integer(date), y = mean_value_p), color = "#002d9a") +
+  geom_smooth(aes(x = as.integer(date), y = mean_value_t), method = "lm", se = FALSE, linetype = "dashed", color = "black") +
+  geom_smooth(aes(x = as.integer(date), y = mean_value_p), method = "lm", se = FALSE, linetype = "dashed", color = "black") +
+  scale_y_continuous(name = "Annual average\ntemperature (\u00B0F)", sec.axis = sec_axis(transform = ~.*1, name = "Annual total\nprecipitation (in)")) +
+  scale_x_continuous(limits = c(1895, as.integer(params$year_to_assess)), breaks = seq(1900,2020, by = 10)) +
+  theme(
+    axis.title.x = element_blank(),
+    axis.title.y.left = element_text(color = "#f91219"),
+    axis.text.y.left = element_text(color = "#f91219"),
+    axis.title.y.right = element_text(color = "#002d9a"),
+    axis.text.y.right = element_text(color = "#002d9a"),
+    axis.text.x = element_text(color = "black"),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.major.y = element_line(color = "grey"),
+    panel.grid.minor.y = element_line(color = "grey"),
+    panel.background = element_rect(fill = "white", color = "black")
+  )
+```
+
+------------------------------------------------------------------------
+
+```{r tides-header, echo=FALSE, eval=print_tide_data}
+knitr::asis_output(paste0("## ", "Tide Levels", "\\n"))
+```
+
+```{r tides-text, message=FALSE, warning=FALSE, include=FALSE}
+tides_text <- tides_text_fun(park_code = params$park_code, nwlon_station1 = nwlon_station1, nwlon_station_location1 = nwlon_station_location1, nwlon_base_year1 = nwlon_base_year1, nwlon_station2 = nwlon_station2, nwlon_station_location2 = nwlon_station_location2, nwlon_base_year2 = nwlon_base_year2)
+
+print_tides_county2 <- print_tide_data && print_multiple_county && params$park_code != "GATE"
+```
+
+```{r print-tides-text, echo=FALSE, eval=print_tide_data}
+knitr::asis_output(tides_text)
+```
+
+```{r tides-fig-county1, eval=print_tide_data, echo=FALSE, message=FALSE, warning=FALSE, fig.cap=paste0("This bar graph depicts the difference in the predicted and observed tide levels at ", nwlon_station_location1, " for ", params$year_to_assess, ". Data are available at NOAA Tides & Currents (https://tidesandcurrents.noaa.gov/stationhome.html?id=", nwlon_station1, ")."), fig.align='center'}
+# This data needs to be downloaded manually from NOAA tides and currents for each park:
+# 1. Go the tides and currents page for each station and then go to "Tides/Water Levels" -> "Water Levels" e.g. https://tidesandcurrents.noaa.gov/waterlevels.html?id=8570283
+# 2. Get the data for 1 month at a time - units: metric, timezone: LST/LDT, datum: NAVD, interval: 6 min
+# 3. Within the "data" folder create a folder for the year ("2020") and then within the year folder, create a folder for each park ("ASIS")
+# 4. Save the data for each month in a csv named parkcode_year_countyx_tides_month.csv e.g. ASIS_2020_county1_tides_02.csv for water level for ASIS in February 2020. 
+
+tides_county1 <- data.frame(
+  month = seq(1, 12, by = 1)
+) %>%
+  mutate(month = str_pad(month, width = 2, side = "left", pad = "0")) %>%
+  mutate(df = map(month, ~read_csv(here::here("data", params$year_to_assess, params$park_code, paste0(params$park_code, "_", params$year_to_assess, "_county1_tides_", .x, ".csv")), col_types = c("Dtnnn")))) %>%
+  unnest(cols = c(df)) %>%
+  select("date" = Date, "time" = `Time (LST/LDT)`, "predicted_m" = `Predicted (m)`, "preliminary_m" = `Preliminary (m)`, "verified_m" = `Verified (m)`) %>%
+  mutate(datetime = as_datetime(paste(date, time)),
+         difference_m = verified_m-predicted_m)
+
+ggplot(tides_county1, aes(x = datetime, y = difference_m*100)) +
+  geom_area(color = "#f91219", fill = "#f91219") +
+  scale_y_continuous(name = "Height difference (cm)") +
+  scale_x_continuous(breaks = as.numeric(seq.POSIXt(first(tides_county1$datetime), last(tides_county1$datetime), by = "1 month")), labels = c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")) +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_text(color = "black"),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        panel.grid.major.y = element_line(color = "grey"),
+        panel.grid.minor.y = element_line(color = "grey"),
+        panel.background = element_rect(fill = "white", color = "black"))
+```
+
+```{r tides-fig-county2, eval=print_tides_county2, echo=FALSE, message=FALSE, warning=FALSE, fig.cap=paste0("This bar graph depicts the difference in the predicted and observed tide levels at ", nwlon_station_location2, " for ", params$year_to_assess, ". Data are available at NOAA Tides & Currents (https://tidesandcurrents.noaa.gov/stationhome.html?id=", nwlon_station2, ")."), fig.align='center'}
+# This data needs to be downloaded manually from NOAA tides and currents for each park:
+# 1. Go the tides and currents page for each station and then go to "Tides/Water Levels" -> "Water Levels" e.g. https://tidesandcurrents.noaa.gov/waterlevels.html?id=8570283
+# 2. Get the data for 1 month at a time - units: metric, timezone: LST/LDT, datum: NAVD, interval: 6 min
+# 3. Within the "data" folder create a folder for the year ("2020") and then within the year folder, create a folder for each park ("ASIS")
+# 4. Save the data for each month in a csv named parkcode_year_countyx_tides_month.csv e.g. ASIS_2020_county1_tides_02.csv for water level for ASIS in February 2020. 
+
+tides_county2 <- data.frame(
+  month = seq(1, 12, by = 1)
+) %>%
+  mutate(month = str_pad(month, width = 2, side = "left", pad = "0")) %>%
+  mutate(df = map(month, ~read_csv(here::here("data", params$year_to_assess, params$park_code, paste0(params$park_code, "_", params$year_to_assess, "_county2_tides_", .x, ".csv")), col_types = c("Dtnnn")))) %>%
+  unnest(cols = c(df)) %>%
+  select("date" = Date, "time" = `Time (LST/LDT)`, "predicted_m" = `Predicted (m)`, "preliminary_m" = `Preliminary (m)`, "verified_m" = `Verified (m)`) %>%
+  mutate(datetime = as_datetime(paste(date, time)),
+         difference_m = verified_m-predicted_m)
+
+ggplot(tides_county2, aes(x = datetime, y = difference_m*100)) +
+  geom_area(color = "#f91219", fill = "#f91219") +
+  scale_y_continuous(name = "Height difference (cm)") +
+  scale_x_continuous(breaks = as.numeric(seq.POSIXt(first(tides_county2$datetime), last(tides_county2$datetime), by = "1 month")), labels = c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")) +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_text(color = "black"),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        panel.grid.major.y = element_line(color = "grey"),
+        panel.grid.minor.y = element_line(color = "grey"),
+        panel.background = element_rect(fill = "white", color = "black"))
+```
+
+```{r tides-horizontal-rule, echo=FALSE, message=FALSE, warning=FALSE, results='asis', eval=print_tide_data}
+cat("\n---\n")
+```
+
+# Wind
+
+```{r wind-text-directions-colocaco, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# NOTE: For CACO and COLO county1, wind data are downloaded from NOAA NCEI Local Climatological Data (LCD) version 2: https://www.ncei.noaa.gov/access/search/data-search/local-climatological-data-v2
+# For CACO, wind data are from Provincetown Municipal Airport: https://www.ncei.noaa.gov/access/search/data-search/local-climatological-data-v2?stations=USW00064708
+# For COLO county1, wind data are from Williamsburg Jamestown Airport: https://www.ncei.noaa.gov/access/search/data-search/local-climatological-data-v2?stations=USW00003730
+# Directions: Download the yearly data from the above websites and save them in the respective year and park folder in the 'data' folder as park_year_countyx_wind.csv - e.g. "COLO_2020_county1_wind.csv"
+```
+
+```{r wind-text, message=FALSE, warning=FALSE, include=FALSE}
+wind_text <- wind_text_fun(park_code = params$park_code, nwlon_station1 = nwlon_station1, nwlon_station_location1 = nwlon_station_location1, nwlon_base_year1 = nwlon_base_year1, nwlon_station2 = nwlon_station2, nwlon_station_location2 = nwlon_station_location2, nwlon_base_year2 = nwlon_base_year2)
+
+if (params$park_code == "COLO") {
+  wind_fig_nums <- "Figure 9 and 10"
+  wind_fig_county1_caption <- paste0("Wind charts reflecting both the seasonal and annual wind direction and speed at the weather station located at Williamsburg Jamestown Airport during ", params$year_to_assess, ". Data are available at NOAA NCEI: Local Climatological Data (https://www.ncei.noaa.gov/access/search/data-search/local-climatological-data-v2?stations=USW00003730).")
+  wind_fig_county2_caption <- paste0("Wind charts reflecting both the seasonal and annual wind direction and speed at the NOAA NWLON station ", nwlon_station2, " located at ", nwlon_station_location2, " during ", params$year_to_assess, ". Data are available at NOAA Tides & Currents (https://tidesandcurrents.noaa.gov/stationhome.html?id=", nwlon_station2, ").")
+} else if (params$park_code == "GATE") {
+  wind_fig_nums <- "Figure 8"
+  wind_fig_county1_caption <- paste0("Wind charts reflecting both the seasonal and annual wind direction and speed at the NOAA NWLON station ", nwlon_station1, " located at ", nwlon_station_location1, " during ", params$year_to_assess, ". Data are available at NOAA Tides & Currents (https://tidesandcurrents.noaa.gov/stationhome.html?id=", nwlon_station1, ").")
+} else if (params$park_code == "CACO") {
+  wind_fig_nums <- "Figure 5"
+  wind_fig_county1_caption <- paste0("Wind charts reflecting both the seasonal and annual wind direction and speed at the weather station station located at Provincetown Municipal Airport during ", params$year_to_assess, ". Data are available at NOAA NCEI: Local Climatological Data (https://www.ncei.noaa.gov/access/search/data-search/local-climatological-data-v2?stations=USW00014765).")
+} else {
+  wind_fig_nums <- "Figure 5"
+  wind_fig_county1_caption <- paste0("Wind charts reflecting both the seasonal and annual wind direction and speed at the NOAA NWLON station ", nwlon_station1, " located at ", nwlon_station_location1, " during ", params$year_to_assess, ". Data are available at NOAA Tides & Currents (https://tidesandcurrents.noaa.gov/stationhome.html?id=", nwlon_station1, ").")
+}
+```
+
+`r wind_text` Each direction is divided up into categories called bins that are color coded to represent the frequency of a certain wind speed. The length of the bin represents the number of times wind comes from a given direction as well as the speed of the wind. The longer the length of the bin, the more frequent the given speed was recorded (`r wind_fig_nums`).
+
+```{r wind-plot-functions, message=FALSE, warning=FALSE, include=FALSE}
+annual_wind_plot_fun <- function(wind_df, wind_plot_y_max, county = "county1") {
+  ggdraw() +
+    draw_plot(
+      ggplot(wind_df, aes(x = direction_degrees)) +
+        geom_histogram(aes(fill = fct_rev(speed_group)), color = "black", stat = "bin", binwidth = 5, boundary = 0) +
+        
+        {if (params$park_code %in% c("CACO", "COLO") & county == "county1")
+          scale_x_continuous(breaks = c(50, 97, 140, 185, 230, 272, 320, 360), labels = c("NE", "E", "SE", "S", "SW", "W", "NW", "N"))
+          else if (params$park_code %in% c("COLO") & county == "county2")
+            scale_x_continuous(breaks = seq(0,315, by = 45), labels = c("N", "NE", "E", "SE", "S", "SW", "W", "NW"))
+          else
+            scale_x_continuous(breaks = seq(0,315, by = 45), labels = c("N", "NE", "E", "SE", "S", "SW", "W", "NW"))} +
+        
+        geomtextpath::coord_curvedpolar(clip = "off") +
+        scale_y_continuous(breaks = c(0,wind_plot_y_max), expand = c(0,0)) +
+        scale_fill_manual(breaks = c("<10", "10-20", "20-30", ">30"), values = c("#2c7bb6", "#abd9e9", "#fdae61", "#d7191c"), name = "Wind speed (mph)") +
+        labs(title = params$year_to_assess) +
+        theme(
+          panel.grid.minor = element_blank(),
+          panel.grid.major = element_line(color = "black"),
+          axis.ticks = element_blank(),
+          axis.title = element_blank(),
+          axis.text.y = element_blank(),
+          panel.background = element_blank(),
+          legend.position = "bottom",
+          legend.text = element_text(size = 8),
+          legend.title = element_text(size = 8),
+          legend.key.size = unit(7, "pt"),
+          plot.title = element_text(size = 12, hjust = 0.5)
+        ) +
+        {if (params$park_code %in% c("COLO", "CACO") & county == "county1")
+          theme(axis.text.x = element_text(color = "black", vjust = 1.5))
+          else if (params$park_code %in% c("COLO") & county == "county2")
+            theme(axis.text.x = element_text(color = "black", vjust = -0.5))
+          else 
+            theme(axis.text.x = element_text(color = "black", vjust = -0.5))
+          }
+    )
+}
+
+season_wind_plot_fun <- function(wind_df, season_name, wind_plot_y_max, county = "county1") {
+  ggdraw() +
+    draw_plot(
+      ggplot(wind_df %>% filter(season == season_name), aes(x = direction_degrees)) +
+        geom_histogram(aes(fill = fct_rev(speed_group)), color = "black", stat = "bin", binwidth = 5, boundary = 0) +
+        geomtextpath::coord_curvedpolar(clip = "off") +
+        
+        {if (params$park_code == "CACO" | (params$park_code == "COLO" & county == "county1"))
+          scale_x_continuous(breaks = c(50, 97, 140, 185, 230, 272, 320, 360), labels = c("NE", "E", "SE", "S", "SW", "W", "NW", "N"))
+          else
+            scale_x_continuous(breaks = seq(0,315, by = 45), labels = c("N", "NE", "E", "SE", "S", "SW", "W", "NW"))} +
+        
+        scale_y_continuous(breaks = c(0,wind_plot_y_max), expand = c(0,0)) +
+        scale_fill_manual(breaks = c("<10", "10-20", "20-30", ">30"), values = c("#2c7bb6", "#abd9e9", "#fdae61", "#d7191c"), name = "Wind speed (mph)") +
+        labs(title = str_to_sentence(season_name)) +
+        theme(
+          panel.grid.minor = element_blank(),
+          panel.grid.major = element_line(color = "black"),
+          axis.ticks = element_blank(),
+          axis.title = element_blank(),
+          axis.text.y = element_blank(),
+          panel.background = element_blank(),
+          legend.position = "none",
+          plot.title = element_text(size = 10, hjust = 0.5),
+          plot.background = element_blank()
+        )  +
+        {if (params$park_code == "CACO" | (params$park_code == "COLO" & county == "county1"))
+          theme(axis.text.x = element_text(color = "black", vjust = 1.25))
+          else 
+            theme(axis.text.x = element_text(color = "black", vjust = 0))
+          }
+    )
+}
+```
+
+```{r wind-fig-county1, echo=FALSE, message=FALSE, warning=FALSE, fig.cap=wind_fig_county1_caption, fig.align='center'}
+
+if (params$park_code %in% c("COLO", "CACO")) {
+  wind_county1 <- read.csv(here::here("data", params$year_to_assess, params$park_code, paste0(params$park_code, "_", params$year_to_assess, "_county1_wind.csv"))) %>%
+    select("datetime" = DATE, "direction_degrees" = HourlyWindDirection, "speed_mph" = HourlyWindSpeed) %>%
+    mutate(datetime = as.POSIXct(datetime, format = "%Y-%m-%dT%H:%M:%S"),
+           direction_degrees = as.numeric(direction_degrees),
+           speed_mph = as.numeric(speed_mph)) %>%
+    filter(speed_mph > 0) %>%
+    mutate(month = month(datetime),
+           season = case_when(
+             month >= 1 & month <= 3 ~ "winter",
+             month >= 4 & month <= 6 ~ "spring",
+             month >= 7 & month <= 9 ~ "summer",
+             month >= 10 & month <= 12 ~ "fall"
+           ),
+           direction_bin = cut_interval(direction_degrees, length = 5, boundary = 0),
+           speed_group = factor(case_when(
+             speed_mph <= 10 ~ "<10", 
+             speed_mph > 10 & speed_mph <= 20 ~ "10-20",
+             speed_mph > 20 & speed_mph <= 30 ~ "20-30",
+             speed_mph > 30 ~ ">30"
+           ), levels = c("<10", "10-20", "20-30", ">30"))) %>%
+    drop_na()
+} else {
+  wind_county1 <- data.frame(
+    month = seq(1, 12, by = 1),
+    day = 1, 
+    year = params$year_to_assess
+  ) %>%
+    mutate(first_date = as.Date(paste0(year, "-", month, "-", day)),
+           last_date = ceiling_date(first_date, unit = "month")-days(1),
+           first_date_text = paste0(year, str_pad(month, width = 2, side = "left", pad = "0"), "01"),
+           last_date_text = paste0(year, str_pad(month, width = 2, side = "left", pad = "0"), str_sub(last_date, 9, 10))) %>%
+    group_by(month) %>%
+    mutate(response = map2(first_date_text, last_date_text, ~GET(paste0("https://api.tidesandcurrents.noaa.gov/api/prod/datagetter?begin_date=", .x, "&end_date=", .y, "&station=", nwlon_station1, "&product=wind&datum=STND&time_zone=lst_ldt&units=english&format=json")))) %>%
+    mutate(wind_data = map(response, ~fromJSON(rawToChar(.x$content), flatten = TRUE) %>% pluck("data"))) %>%
+    select(-response) %>%
+    unnest(cols = c(wind_data)) %>%
+    select("datetime" = t, "speed_knots" = s, "direction_degrees" = d, "direction_text" = dr, "gust" = g, "flag" = f) %>%
+    mutate(datetime = as_datetime(datetime, format = "%Y-%m-%d %H:%M"),
+           across(c(speed_knots, direction_degrees, gust), ~as.numeric(.x)),
+           speed_mph = speed_knots * 1.150779448,
+           season = case_when(
+             month >= 1 & month <= 3 ~ "winter",
+             month >= 4 & month <= 6 ~ "spring",
+             month >= 7 & month <= 9 ~ "summer",
+             month >= 10 & month <= 12 ~ "fall"
+           ),
+           direction_bin = cut_interval(direction_degrees, length = 5, boundary = 0),
+           speed_group = factor(case_when(
+             speed_mph <= 10 ~ "<10", 
+             speed_mph > 10 & speed_mph <= 20 ~ "10-20",
+             speed_mph > 20 & speed_mph <= 30 ~ "20-30",
+             speed_mph > 30 ~ ">30"
+           ), levels = c("<10", "10-20", "20-30", ">30"))) %>%
+    drop_na()
+}
+
+annual_wind_plot_county1 <- annual_wind_plot_fun(wind_df = wind_county1, wind_plot_y_max = wind_plot_y_max)
+
+winter_wind_plot_county1 <- season_wind_plot_fun(wind_df = wind_county1, season_name = "winter", wind_plot_y_max = wind_plot_y_max)
+spring_wind_plot_county1 <- season_wind_plot_fun(wind_df = wind_county1, season_name = "spring", wind_plot_y_max = wind_plot_y_max)
+summer_wind_plot_county1 <- season_wind_plot_fun(wind_df = wind_county1, season_name = "summer", wind_plot_y_max = wind_plot_y_max)
+fall_wind_plot_county1 <- season_wind_plot_fun(wind_df = wind_county1, season_name = "fall", wind_plot_y_max = wind_plot_y_max)
+
+ggdraw() +
+  draw_grob(as_grob(annual_wind_plot_county1), scale = 0.9) +
+  draw_grob(as_grob(winter_wind_plot_county1), scale = 0.45, x = 0.15, y = 0.28, hjust = 0.5) +
+  draw_grob(as_grob(fall_wind_plot_county1), scale = 0.45, x = 0.15, y = -0.25, hjust = 0.5) +
+  draw_grob(as_grob(spring_wind_plot_county1), scale = 0.45, x = 0.85, y = 0.28, hjust = 0.5) +
+  draw_grob(as_grob(summer_wind_plot_county1), scale = 0.45, x = 0.85, y = -0.25, hjust = 0.5) 
+```
+```{r print-wind-county2, message=FALSE, warning=FALSE, include=FALSE}
+print_wind_county2 <- print_multiple_county && params$park_code != "GATE"
+```
+
+```{r wind-fig-county2, eval=print_wind_county2, echo=FALSE, message=FALSE, warning=FALSE, fig.cap=wind_fig_county2_caption, fig.align='center'}
+
+if (params$park_code == "COLO") {
+  wind_county2 <- data.frame(
+    month = seq(1, 12, by = 1),
+    day = 1, 
+    year = params$year_to_assess
+  ) %>%
+    mutate(first_date = as.Date(paste0(year, "-", month, "-", day)),
+           last_date = ceiling_date(first_date, unit = "month")-days(1),
+           first_date_text = paste0(year, str_pad(month, width = 2, side = "left", pad = "0"), "01"),
+           last_date_text = paste0(year, str_pad(month, width = 2, side = "left", pad = "0"), str_sub(last_date, 9, 10))) %>%
+    group_by(month) %>%
+    mutate(response = map2(first_date_text, last_date_text, ~GET(paste0("https://api.tidesandcurrents.noaa.gov/api/prod/datagetter?begin_date=", .x, "&end_date=", .y, "&station=", nwlon_station2, "&product=wind&datum=STND&time_zone=lst_ldt&units=english&format=json")))) %>%
+    mutate(wind_data = map(response, ~fromJSON(rawToChar(.x$content), flatten = TRUE) %>% pluck("data"))) %>%
+    select(-response) %>%
+    unnest(cols = c(wind_data)) %>%
+    select("datetime" = t, "speed_knots" = s, "direction_degrees" = d, "direction_text" = dr, "gust" = g, "flag" = f) %>%
+    mutate(datetime = as_datetime(datetime, format = "%Y-%m-%d %H:%M"),
+           across(c(speed_knots, direction_degrees, gust), ~as.numeric(.x)),
+           speed_mph = speed_knots * 1.150779448,
+           season = case_when(
+             month >= 1 & month <= 3 ~ "winter",
+             month >= 4 & month <= 6 ~ "spring",
+             month >= 7 & month <= 9 ~ "summer",
+             month >= 10 & month <= 12 ~ "fall"
+           ),
+           direction_bin = cut_interval(direction_degrees, length = 5, boundary = 0),
+           speed_group = as_factor(case_when(
+             speed_mph <= 10 ~ "<10", 
+             speed_mph > 10 & speed_mph <= 20 ~ "10-20",
+             speed_mph > 20 & speed_mph <= 30 ~ "20-30",
+             speed_mph > 30 ~ ">30"
+           ))) %>%
+    drop_na()
+} else {
+  wind_county2 <- ""
+}
+
+annual_wind_plot_county2 <- annual_wind_plot_fun(wind_df = wind_county2, wind_plot_y_max = wind_plot_y_max, county = "county2")
+
+winter_wind_plot_county2 <- season_wind_plot_fun(wind_df = wind_county2, season_name = "winter", wind_plot_y_max = wind_plot_y_max, county = "county2")
+spring_wind_plot_county2 <- season_wind_plot_fun(wind_df = wind_county2, season_name = "spring", wind_plot_y_max = wind_plot_y_max, county = "county2")
+summer_wind_plot_county2 <- season_wind_plot_fun(wind_df = wind_county2, season_name = "summer", wind_plot_y_max = wind_plot_y_max, county = "county2")
+fall_wind_plot_county2 <- season_wind_plot_fun(wind_df = wind_county2, season_name = "fall", wind_plot_y_max = wind_plot_y_max, county = "county2")
+
+ggdraw() +
+  draw_grob(as_grob(annual_wind_plot_county2), scale = 0.9) +
+  draw_grob(as_grob(winter_wind_plot_county2), scale = 0.45, x = 0.15, y = 0.28, hjust = 0.5) +
+  draw_grob(as_grob(fall_wind_plot_county2), scale = 0.45, x = 0.15, y = -0.25, hjust = 0.5) +
+  draw_grob(as_grob(spring_wind_plot_county2), scale = 0.45, x = 0.85, y = 0.28, hjust = 0.5) +
+  draw_grob(as_grob(summer_wind_plot_county2), scale = 0.45, x = 0.85, y = -0.25, hjust = 0.5)
+```
+
+```{js fix-filtering, echo=FALSE, message=FALSE, warning=FALSE}
+function filter_default(){
+  document.getElementById("show_all").style.display = "none";
+  document.getElementById("show_all").getElementsByClassName("selectized")[0].selectize.setValue("Select all", false);
+}
+    
+$(document).ready(filter_default);
+```
